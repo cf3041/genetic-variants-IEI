@@ -56,26 +56,6 @@ def main():
 	CTLA4_label = 'Lymphocytes/Single Cells/Live | Median (Comp-PE-Cy7-A :: null)'
 	CTLA4p_label = 'Lymphocytes/Single Cells/Live/CTLA4 POS | Freq. of Parent'
 	PD1p_label = 'Lymphocytes/Single Cells/Live/PD1 POS | Freq. of Parent'
-
-	# elif curr_sheet == 'CD8':
-	# 	title_text = 'CD8'
-	# 	TOX_label = 'Lymphocytes/Single Cells/Live/Q1: Comp-BV480-A- , Comp-BV421-A+ | Mean (Comp-APC-A :: null)'
-	# 	LAG3_label = 'Lymphocytes/Single Cells/Live/Q1: Comp-BV480-A- , Comp-BV421-A+ | Median (Comp-BV605-A :: null)'
-	# 	PD1_label = 'Lymphocytes/Single Cells/Live/Q1: Comp-BV480-A- , Comp-BV421-A+ | Median (Comp-PE-A :: null)'
-	# 	CTLA4_label = 'Lymphocytes/Single Cells/Live/Q1: Comp-BV480-A- , Comp-BV421-A+ | Median (Comp-PE-Cy7-A :: null)'
-	# 	CTLA4p_label = 'Lymphocytes/Single Cells/Live/Q1: Comp-BV480-A- , Comp-BV421-A+/CTLA4 POS | Freq. of Parent'
-	# 	PD1p_label = 'Lymphocytes/Single Cells/Live/Q1: Comp-BV480-A- , Comp-BV421-A+/PD1 POS | Freq. of Parent'
-	# elif curr_sheet == 'CD4':
-	# 	title_text = 'CD4'
-	# 	TOX_label = 'Lymphocytes/Single Cells/Live/Q3: Comp-BV480-A+ , Comp-BV421-A- | Mean (Comp-APC-A :: null)'
-	# 	LAG3_label = 'Lymphocytes/Single Cells/Live/Q3: Comp-BV480-A+ , Comp-BV421-A- | Median (Comp-BV605-A :: null)'
-	# 	PD1_label = 'Lymphocytes/Single Cells/Live/Q3: Comp-BV480-A+ , Comp-BV421-A- | Median (Comp-PE-A :: null)'
-	# 	CTLA4_label = 'Lymphocytes/Single Cells/Live/Q3: Comp-BV480-A+ , Comp-BV421-A- | Median (Comp-PE-Cy7-A :: null)'
-	# 	CTLA4p_label = 'Lymphocytes/Single Cells/Live/Q3: Comp-BV480-A+ , Comp-BV421-A-/CTLA4 POS | Freq. of Parent'
-	# 	PD1p_label = 'Lymphocytes/Single Cells/Live/Q3: Comp-BV480-A+ , Comp-BV421-A-/PD1 POS | Freq. of Parent'
-	# else:
-	# 	bp()
-
 	
 	column_names = ['Sample', 'Treatment', 'TOX', 'LAG-3', 'PD1', 'CTLA-4', 'CTLA-4 p', 'PD1 p', 'TCF p', 'Ki67 p']
 	plot_df = pd.DataFrame(columns=column_names)
@@ -221,8 +201,6 @@ def main():
 	pd.DataFrame({'TOX p-value' : TOX_p_vals, 'CTLA-4 p-value' : CTLA4_p_vals,
 				  'PD1 p-value' : PD1_p_vals, 'TCF p-value' : TCF_p_vals,
 				  'Ki67 p-value' : Ki67_p_vals}, index=TOX_conds).to_excel('./Dunnett_results.xlsx')
-
-	bp()
 
 	plot_df.to_excel('./FigS7_raw_data.xlsx', index=False)
 
