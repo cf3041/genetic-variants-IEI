@@ -79,7 +79,7 @@ PIK3R1_domains = {
 def main():
 
 	# Load the Excel file
-	file_path = '/Users/cf3041/Library/CloudStorage/OneDrive-ColumbiaUniversityIrvingMedicalCenter/Base Editing v3 - Clinical Assay Screens to pair with HACE (PIK3)/BEv3_008_pAKT_pS6_Screen_r3 (with MaxCyte electroporation)/Analysis with CJF/MAGeCK/DP_vs_DN_Maxcyte_X2.sgrna_summary.xlsx'
+	file_path = './DP_vs_DN_Maxcyte_X2.sgrna_summary.xlsx'
 	data = pd.read_excel(file_path)
 	data.head()  # View the structure of the data
 
