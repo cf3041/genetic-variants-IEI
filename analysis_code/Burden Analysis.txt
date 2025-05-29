@@ -1,0 +1,856 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[1]:
+
+
+get_ipython().run_line_magic("pip", "install statsmodels")
+get_ipython().run_line_magic("pip", "install PheTK")
+get_ipython().run_line_magic("pip", "install --upgrade pandas_gbq")
+
+
+# In[2]:
+
+
+get_ipython().run_cell_magic(
+    "bash",
+    "",
+    "\ngsutil cp gs://genomics-public-data/references/hg38/v0/Homo_sapiens_assembly38.fasta .\n",
+)
+
+
+# In[1]:
+
+
+import os
+import pickle
+import warnings
+
+import numpy as np
+import pandas as pd
+
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
+from PheTK import _utils as phetk_utils
+from pytz import utc
+from statsmodels.stats.contingency_tables import mcnemar
+from statsmodels.stats.multitest import multipletests
+from scipy.stats.contingency import odds_ratio, chi2_contingency
+
+warnings.filterwarnings("ignore")
+
+concept_code_name_mapping = {}
+concept_id_name_mapping = {}
+concept_id_code_mapping = {}
+
+
+def get_condition_df(person_ids, logical=True, human_readable_columns=True):
+    if human_readable_columns == True:
+        column_name = "standard_concept_name"
+    elif human_readable_columns == "concept_id":
+        column_name = "condition_concept_id"
+    else:
+        column_name = "source_concept_code"
+
+    condition_sql = (
+        """
+        SELECT
+            c_occurrence.person_id,
+            c_occurrence.condition_concept_id,
+            c_standard_concept.concept_name as standard_concept_name,
+            c_standard_concept.concept_code as standard_concept_code,
+            c_standard_concept.vocabulary_id as standard_vocabulary,
+            c_occurrence.condition_start_datetime,
+            c_occurrence.condition_end_datetime,
+            c_occurrence.condition_type_concept_id,
+            c_type.concept_name as condition_type_concept_name,
+            c_occurrence.stop_reason,
+            c_occurrence.visit_occurrence_id,
+            visit.concept_name as visit_occurrence_concept_name,
+            c_occurrence.condition_source_value,
+            c_occurrence.condition_source_concept_id,
+            c_source_concept.concept_name as source_concept_name,
+            c_source_concept.concept_code as source_concept_code,
+            c_source_concept.vocabulary_id as source_vocabulary,
+            c_occurrence.condition_status_source_value,
+            c_occurrence.condition_status_concept_id,
+            c_status.concept_name as condition_status_concept_name,
+            person.race_source_value,
+            person.ethnicity_source_value,
+            person.gender_source_value,
+            person.birth_datetime
+        FROM
+            ( SELECT
+                * 
+            FROM
+                `"""
+        + os.environ["WORKSPACE_CDR"]
+        + """.condition_occurrence` c_occurrence 
+            WHERE
+                (c_occurrence.PERSON_ID IN ("""
+        + ",".join(str(person_id) for person_id in person_ids)
+        + """))
+            ) c_occurrence 
+            LEFT JOIN
+                `"""
+        + os.environ["WORKSPACE_CDR"]
+        + """.concept` c_standard_concept 
+                    ON c_occurrence.condition_concept_id = c_standard_concept.concept_id 
+            LEFT JOIN
+                `"""
+        + os.environ["WORKSPACE_CDR"]
+        + """.concept` c_type 
+                    ON c_occurrence.condition_type_concept_id = c_type.concept_id 
+            LEFT JOIN
+                `"""
+        + os.environ["WORKSPACE_CDR"]
+        + """.visit_occurrence` v 
+                    ON c_occurrence.visit_occurrence_id = v.visit_occurrence_id 
+            LEFT JOIN
+                `"""
+        + os.environ["WORKSPACE_CDR"]
+        + """.concept` visit 
+                    ON v.visit_concept_id = visit.concept_id 
+            LEFT JOIN
+                `"""
+        + os.environ["WORKSPACE_CDR"]
+        + """.concept` c_source_concept 
+                    ON c_occurrence.condition_source_concept_id = c_source_concept.concept_id 
+            LEFT JOIN
+                `"""
+        + os.environ["WORKSPACE_CDR"]
+        + """.concept` c_status 
+                    ON c_occurrence.condition_status_concept_id = c_status.concept_id
+            LEFT JOIN
+                `"""
+        + os.environ["WORKSPACE_CDR"]
+        + """.person` person 
+                    ON c_occurrence.person_id = person.person_id"""
+    )
+
+    conditions_df = pd.read_gbq(
+        condition_sql,
+        dialect="standard",
+        use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+        progress_bar_type="tqdm_notebook",
+    )
+
+    for concept_code, concept_id, concept_name in zip(
+        conditions_df["source_concept_code"],
+        conditions_df["condition_concept_id"],
+        conditions_df["standard_concept_name"],
+    ):
+        concept_code_name_mapping[concept_code] = concept_name
+        concept_id_name_mapping[concept_id] = concept_name
+        concept_id_code_mapping[concept_id] = concept_code
+
+    all_conditions = conditions_df[column_name].drop_duplicates()
+    conditions_df = conditions_df.sort_values("person_id")
+
+    tmp = {}
+    for person, person_df in conditions_df.groupby("person_id"):
+        conditions_logical = {
+            condition: (condition in person_df[column_name].values)
+            for condition in all_conditions
+        }
+        conditions_logical["age"] = int(
+            relativedelta(
+                utc.localize(datetime.now()), person_df["birth_datetime"].iloc[0]
+            ).years
+        )
+        conditions_logical["ethnicity"] = person_df["ethnicity_source_value"].iloc[0]
+        conditions_logical["race"] = person_df["race_source_value"].iloc[0]
+        conditions_logical["gender"] = person_df["gender_source_value"].iloc[0]
+        tmp[person] = conditions_logical
+
+    logical_df = pd.DataFrame.from_dict(tmp, orient="index")
+    logical_df = logical_df.reset_index(names="person_id").sort_values("person_id")
+
+    if logical:
+        return logical_df
+    else:
+        return conditions_df
+
+
+met285_case_sample_ids = []  # REDACTED
+
+combined_case_sample_ids = []  # REDACTED
+
+all_case_sample_ids = met285_case_sample_ids + combined_case_sample_ids
+
+case_sample_ids = {
+    "Met285Thr": met285_case_sample_ids,
+    "GOF": combined_case_sample_ids,
+    "GOF_no_Met285Thr": list(
+        set(combined_case_sample_ids) - set(met285_case_sample_ids)
+    ),
+}
+
+
+# In[2]:
+
+
+TOTAL_PID_SIZE = pd.read_gbq(
+    """
+         SELECT
+             COUNT( DISTINCT person_id) 
+         FROM
+             `"""
+    + os.environ["WORKSPACE_CDR"]
+    + """.condition_occurrence`
+    """,
+    dialect="standard",
+    use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+).iloc[0, 0]
+
+STEP_SIZE = 10
+CONTROL_COHORT_MULTIPLIER = 100
+BUCKETS = ["GOF", "GOF_no_Met285Thr"]
+
+
+# In[3]:
+
+
+with open("control_sample_ids.pickle", "rb") as handle:
+    control_sample_ids = pickle.load(handle)
+
+control_sample_ids.keys()
+
+
+# In[29]:
+
+
+def get_controls(sample_ids, excluded_ids):
+    age_sex_sql = (
+        """
+        SELECT
+            person.gender_source_value,
+            person.birth_datetime,
+            person.person_id
+        FROM
+           `"""
+        + os.environ["WORKSPACE_CDR"]
+        + """.person` person
+        WHERE
+            (person.PERSON_ID in ("""
+        + ",".join(sample_ids)
+        + """))
+    """
+    )
+
+    age_sex_df = pd.read_gbq(
+        age_sex_sql,
+        dialect="standard",
+        use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+    )
+
+    already_used_ids = set()
+    for gender, sub_df in age_sex_df.groupby("gender_source_value"):
+        birthdate = sub_df["birth_datetime"]
+
+        ages = (pd.Timestamp.now().tz_localize("UTC") - birthdate) / np.timedelta64(
+            365, "D"
+        )
+        ages = ages.to_list()
+
+        print(gender)
+        for age_bucket_bottom in range(0, 120, STEP_SIZE):
+            print(age_bucket_bottom, end="")
+            relevant_ages = [
+                age
+                for age in ages
+                if age < age_bucket_bottom + STEP_SIZE and age >= age_bucket_bottom
+            ]
+            print(f"({len(relevant_ages)}:", end="")
+            if relevant_ages:
+                time_range_bottom = pd.Timestamp.now() - pd.Timedelta(
+                    days=((age_bucket_bottom + STEP_SIZE) * 365)
+                )
+                time_range_top = pd.Timestamp.now() - pd.Timedelta(
+                    days=((age_bucket_bottom + 0) * 365)
+                )
+                time_range = (
+                    'TIMESTAMP("'
+                    + str(time_range_bottom)
+                    + '") and TIMESTAMP("'
+                    + str(time_range_top)
+                    + '")'
+                )
+
+                matching_id_sql = (
+                    """
+                    SELECT
+                        DISTINCT person.person_id,
+                        person.race_source_value,
+                        person.ethnicity_source_value,
+                        person.gender_source_value,
+                        person.birth_datetime
+                    FROM
+                        `"""
+                    + os.environ["WORKSPACE_CDR"]
+                    + """.person` person 
+                        
+                    LEFT JOIN
+                            `"""
+                    + os.environ["WORKSPACE_CDR"]
+                    + """.condition_occurrence` c_occurrence
+                                ON c_occurrence.person_id = person.person_id
+                    WHERE
+                        (
+                            (c_occurrence.PERSON_ID NOT IN ("""
+                    + ",".join(str(excluded_id) for excluded_id in excluded_ids)
+                    + """)) AND
+                            (person.birth_datetime BETWEEN """
+                    + time_range
+                    + """)
+
+                        )
+                    LIMIT
+                """
+                    + str(len(relevant_ages) * CONTROL_COHORT_MULTIPLIER)
+                )
+
+                matched = pd.read_gbq(
+                    matching_id_sql,
+                    dialect="standard",
+                    use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+                )
+
+                already_used_ids.update(set(matched["person_id"]))
+                print(f"{len(set(matched['person_id']))})", end="\t")
+            else:
+                print(f"0)", end="\t")
+
+        print("done!")
+
+    return already_used_ids
+
+
+control_sample_ids = {}
+all_control_sample_ids = set()
+for bucket in BUCKETS:
+    print("BUCKET:", bucket)
+    control_sample_ids[bucket] = get_controls(
+        case_sample_ids[bucket],
+        list(all_case_sample_ids) + list(all_control_sample_ids),
+    )
+    print("TOTAL NUMBER:", len(control_sample_ids[bucket]))
+    all_control_sample_ids.update(control_sample_ids[bucket])
+
+with open("control_sample_ids.pickle", "wb") as handle:
+    pickle.dump(control_sample_ids, handle)
+
+
+# In[4]:
+
+
+relevant_conditions = set()
+
+bucket_dfs = {}
+for bucket in BUCKETS:
+    case_df = get_condition_df(
+        case_sample_ids[bucket], human_readable_columns="concept_id"
+    )
+    control_df = get_condition_df(
+        control_sample_ids[bucket], human_readable_columns="concept_id"
+    )
+
+    all_conditions = list(
+        (set(case_df.columns) | set(control_df.columns))
+        - {"age", "ethnicity", "gender", "person_id", "race"}
+    )
+
+    relevant_conditions = relevant_conditions | set(all_conditions)
+
+    bucket_dfs[bucket] = pd.DataFrame(
+        columns=[
+            "condition",
+            "odds_ratio",
+            "odds_ratio_5",
+            "odds_ratio_95",
+            "pvalue",
+            "num_case_positive",
+            "num_case_negative",
+            "num_control_positive",
+            "num_control_negative",
+        ]
+    )
+    for i, condition in enumerate(all_conditions):
+        if condition in control_df:
+            num_control_positive = sum(control_df[condition])
+            num_control_negative = len(control_df[condition]) - num_control_positive
+        else:
+            num_control_positive = 0
+            num_control_negative = control_df.shape[0]
+
+        if condition in case_df:
+            num_case_positive = sum(case_df[condition])
+            num_case_negative = len(case_df[condition]) - num_case_positive
+        else:
+            num_case_positive = 0
+            num_case_negative = case_df.shape[0]
+
+        contingency_table = [
+            [num_control_negative, num_control_positive],
+            [num_case_negative, num_case_positive],
+        ]
+
+        chi2_result = chi2_contingency(contingency_table)
+        odds_ratio_result = odds_ratio(contingency_table)
+        odds_ratio_interval = odds_ratio_result.confidence_interval()
+
+        row = {
+            "condition": condition,
+            "odds_ratio": odds_ratio_result.statistic,
+            "odds_ratio_5": odds_ratio_interval.low,
+            "odds_ratio_95": odds_ratio_interval.high,
+            "pvalue": chi2_result.pvalue,
+            "num_case_positive": num_case_positive,
+            "num_case_negative": num_case_negative,
+            "num_control_positive": num_control_positive,
+            "num_control_negative": num_control_negative,
+        }
+
+        bucket_dfs[bucket].loc[i] = row
+
+relevant_concept_codes_sql = (
+    "(" + ", ".join(str(cond) for cond in relevant_conditions) + ")"
+)
+
+condition_counts_sql = (
+    """
+    SELECT
+        condition_concept_id, COUNT(DISTINCT person_id)
+    FROM
+        """
+    + os.environ["WORKSPACE_CDR"]
+    + """.condition_occurrence
+    GROUP BY 
+        condition_concept_id
+    HAVING
+        condition_concept_id in """
+    + relevant_concept_codes_sql
+)
+
+condition_counts_df = pd.read_gbq(
+    condition_counts_sql,
+    dialect="standard",
+    use_bqstorage_api=("BIGQUERY_STORAGE_API_ENABLED" in os.environ),
+)
+
+condition_counts_df["name"] = condition_counts_df.apply(
+    lambda row: concept_id_name_mapping[row["condition_concept_id"]], axis=1
+)
+condition_counts_df["total_count"] = condition_counts_df.apply(
+    lambda row: row["f0_"] / TOTAL_PID_SIZE, axis=1
+)
+condition_counts_df["freq"] = condition_counts_df.apply(
+    lambda row: row["f0_"] / TOTAL_PID_SIZE, axis=1
+)
+condition_freqs = {}
+condition_counts = {}
+for i, row in condition_counts_df.iterrows():
+    condition_counts[row["condition_concept_id"]] = row["f0_"]
+    condition_freqs[row["condition_concept_id"]] = row["freq"]
+
+for bucket in BUCKETS:
+    bucket_dfs[bucket]["control_freq"] = bucket_dfs[bucket].apply(
+        lambda row: row["num_control_positive"]
+        / (row["num_control_negative"] + row["num_control_positive"]),
+        axis=1,
+    )
+    bucket_dfs[bucket]["case_freq"] = bucket_dfs[bucket].apply(
+        lambda row: row["num_case_positive"]
+        / (row["num_case_negative"] + row["num_case_positive"]),
+        axis=1,
+    )
+    bucket_dfs[bucket]["expected_freq"] = bucket_dfs[bucket].apply(
+        lambda row: condition_freqs[row["condition"]], axis=1
+    )
+    bucket_dfs[bucket]["total_count"] = bucket_dfs[bucket].apply(
+        lambda row: condition_counts[row["condition"]], axis=1
+    )
+    bucket_dfs[bucket]["icd_code"] = bucket_dfs[bucket].apply(
+        lambda row: concept_id_code_mapping[row["condition"]], axis=1
+    )
+    bucket_dfs[bucket]["name"] = bucket_dfs[bucket].apply(
+        lambda row: concept_id_name_mapping[row["condition"]], axis=1
+    )
+
+    for i, row in bucket_dfs[bucket].iterrows():
+        num_control_positive = row["total_count"]
+        num_control_negative = TOTAL_PID_SIZE - num_control_positive
+
+        num_case_positive = row["num_case_positive"]
+        num_case_negative = row["num_case_negative"]
+
+        contingency_table = [
+            [num_control_negative, num_control_positive],
+            [num_case_negative, num_case_positive],
+        ]
+
+        chi2_result = chi2_contingency(contingency_table)
+        odds_ratio_result = odds_ratio(contingency_table)
+        odds_ratio_interval = odds_ratio_result.confidence_interval()
+
+        bucket_dfs[bucket].loc[i, "all_controls_p_value"] = chi2_result.pvalue
+        bucket_dfs[bucket].loc[
+            i, "all_controls_odds_ratio"
+        ] = odds_ratio_result.statistic
+        bucket_dfs[bucket].loc[
+            i, "all_controls_odds_ratio_ci_high"
+        ] = odds_ratio_interval.high
+        bucket_dfs[bucket].loc[
+            i, "all_controls_odds_ratio_ci_low"
+        ] = odds_ratio_interval.low
+
+    bucket_dfs[bucket].to_csv(f"{bucket}_enrichment.csv")
+
+
+# In[18]:
+
+
+bucket_dfs["GOF"]
+
+
+# In[88]:
+
+
+general_info_columns = ["person_id", "age", "ethnicity", "race", "gender"]
+
+infections_columns = [
+    "DE_660.11",
+    "ID_089.3",
+    "ID_005",
+    "ID_070",
+    "RE_468.5",
+    "RE_476",
+    "NS_321.11",
+    "NS_321.12",
+    "RE_468.9",
+    "RE_468.2",
+    "NS_320.1",
+    "NS_322.4",
+    "RE_482.1",
+    "ID_004.1",
+    "RE_462.2",
+    "ID_052",
+]
+
+common_allergy_columns = [
+    "RE_475.5",
+    "DE_668.1",
+    "RE_463.2",
+    "SO_367.1",
+    "SS_840.1",
+    "SS_840.8",
+]
+
+rare_allergy_columns = [
+    "BI_171.71",
+    "BI_180.6",
+    "DE_666.2",
+    "DE_666.3",
+    "DE_666.4",
+    "DE_666.6",
+    "GI_522.5",
+    "GI_522.6",
+    "RE_481.1",
+    "SS_840.2",
+    "SS_840.9",
+]
+
+autoinflammatory_columns = [
+    "CV_410.1",
+    "DE_664.2",
+    "DE_664.3",
+    "DE_664.4",
+    "DE_669.3",
+    "DE_682.2",
+    "GI_522.1",
+    "MS_700.6",
+    "MS_705.2",
+    "SO_367.5",
+]
+
+acq_autoimmunity_columns = [
+    "BI_169.11",
+    "BI_180.7",
+    "DE_663.3",
+    "DE_664.1",
+    "DE_668.5",
+    "GI_522.14",
+    "MS_700.7",
+    "MS_704",
+    "NS_321.14",
+    "RE_481.41",
+    "RE_481.6",
+    "SO_374.34",
+]
+
+organ_autoimmunity_columns = [
+    "BI_160.21",
+    "EM_200.411",  # hashimotos thyroiditis - consider removing
+    "EM_202.1",
+    "EM_218.21",
+    "GI_525.1",
+    "GI_540.11",
+    "GU_580",
+    "NS_326.1",
+    "NS_338.1",
+]
+
+rheumatologic_columns = [
+    "BI_168.213",
+    "BI_168.214",
+    "DE_674.1",
+    "DE_687",
+    "GU_580",
+    "MS_700.1",
+    "MS_700.2",
+    "MS_700.3",
+    "MS_700.4",
+    "MS_704",
+    "MS_705.1",
+]
+
+lymphoproliferative_columns = [
+    "BI_171.1",
+    "BI_171.2",
+    "BI_180.4",
+    "CA_120.3",
+    "CA_121.21",
+    "CA_122.1",
+    "CA_122.2",
+    "GE_969.2",
+]
+
+hematologic_columns = [
+    "BI_161.21",
+    "BI_161.22",
+    "BI_162.8",
+    "BI_170.2",
+    "BI_171.71",
+    "BI_172.3",
+    "BI_180.2",
+    "BI_180.7",
+]
+
+immune_deficiency_columns = ["BI_179"]
+
+
+all_categories = [
+    common_allergy_columns,
+    rare_allergy_columns,
+    autoinflammatory_columns,
+    acq_autoimmunity_columns + organ_autoimmunity_columns,
+    rheumatologic_columns,
+    lymphoproliferative_columns,
+    hematologic_columns,
+    immune_deficiency_columns,
+    infections_columns,
+]
+
+all_exclusions = [
+    "B30.1",
+    "B30.3",
+    "B30.8",
+    "B30.9",
+    "B33.23",
+    "B44.81",
+    "B58.01",
+    "D61.810",
+    "D84.81",
+    "D84.82",
+    "D84.821",
+    "D84.822",
+    "D84.89",
+    "H01.111",
+    "H01.114",
+    "H01.119",
+    "H10",
+    "H10.011",
+    "H10.013",
+    "H10.021",
+    "H10.022",
+    "H10.023",
+    "H10.212",
+    "H10.213",
+    "H10.30",
+    "H10.31",
+    "H10.32",
+    "H10.33",
+    "H10.403",
+    "H10.409",
+    "H10.413",
+    "H10.503",
+    "H10.523",
+    "H10.89",
+    "H10.9",
+    "K50.913",
+    "K51.40",
+    "L22",
+    "L23",
+    "L23.0",
+    "L23.1",
+    "L23.2",
+    "L23.4",
+    "L23.5",
+    "L23.7",
+    "L23.89",
+    "L23.9",
+]
+
+category_names = [
+    "common_allergy_columns",
+    "rare_allergy_columns",
+    "autoinflammatory_columns",
+    "autoimmunity_columns",
+    "rheumatologic_columns",
+    "lymphoproliferative_columns",
+    "hematologic_columns",
+    "immune_deficiency_columns",
+    "infections_columns",
+]
+
+phecode_df = phetk_utils.get_phecode_mapping_table(
+    phecode_version="X",
+    icd_version="US",
+    phecode_map_file_path=None,
+    keep_all_columns=True,
+).to_pandas()
+
+
+def get_rollup_df(sample_ids):
+    condition_df = get_condition_df(
+        sample_ids, logical=True, human_readable_columns=False
+    )
+
+    all_matched_columns = []
+    icd_code_column_names = {}
+    for i, category in enumerate(all_categories):
+        all_icd_codes = []
+        for phecode in category:
+            matching_icd_codes = phecode_df[
+                (phecode_df["phecode"] == phecode) & (phecode_df["flag"] == 10)
+            ]["ICD"].to_list()
+            matching_phecode_descriptions = phecode_df[
+                (phecode_df["phecode"] == phecode) & (phecode_df["flag"] == 10)
+            ]["phecode_string"].to_list()
+            all_icd_codes += [
+                code for code in matching_icd_codes if code not in all_exclusions
+            ]
+
+            for icd_code, phecode_description in zip(
+                matching_icd_codes, matching_phecode_descriptions
+            ):
+                icd_code_column_names[icd_code] = (
+                    f"{icd_code} ({phecode}: {phecode_description})"
+                )
+
+        matched_columns = list(
+            set(all_icd_codes).intersection(set(condition_df.keys()))
+        )
+
+        all_matched_columns += matched_columns
+        matched_phecodes = {}
+        for column in condition_df[matched_columns].columns:
+            phecode = icd_code_column_names[column].split("(")[1].split(":")[0]
+            if phecode not in matched_phecodes:
+                matched_phecodes[phecode] = []
+            matched_phecodes[phecode].append(column)
+
+        counts_series = pd.Series(np.zeros(len(sample_ids)))
+        for phecode in matched_phecodes:
+            phecode_column = condition_df[matched_phecodes[phecode]].sum(axis=1)
+            phecode_column = phecode_column.mask(phecode_column > 0, 1)
+            counts_series = counts_series + phecode_column
+
+        condition_df[category_names[i]] = counts_series
+
+    out_df = condition_df[general_info_columns + all_matched_columns + category_names]
+
+    def column_renamer(column):
+        if column in icd_code_column_names:
+            return (
+                concept_code_name_mapping[column] + " " + icd_code_column_names[column]
+            )
+        else:
+            return column
+
+    out_df = out_df.rename(columns=column_renamer)
+
+    return out_df
+
+
+def get_enrichment_df(case_df, control_df):
+    out_rollup_df = pd.DataFrame(
+        columns=[
+            "category_name",
+            "odds_ratio",
+            "odds_ratio_5",
+            "odds_ratio_95",
+            "pvalue",
+            "num_case_positive",
+            "num_case_negative",
+            "num_control_positive",
+            "num_control_negative",
+        ]
+    )
+    for i, category in enumerate(all_categories):
+        category_name = category_names[i]
+
+        if category_name in control_df:
+            num_control_positive = int(sum(control_df[category_name].astype(bool)))
+            num_control_negative = len(control_df[category_name]) - num_control_positive
+        else:
+            num_control_positive = 0
+            num_control_negative = control_df.shape[0]
+
+        if category_name in case_df:
+            num_case_positive = int(sum(case_df[category_name].astype(bool)))
+            num_case_negative = len(case_df[category_name]) - num_case_positive
+        else:
+            num_case_positive = 0
+            num_case_negative = case_df.shape[0]
+
+        contingency_table = [
+            [num_control_negative, num_control_positive],
+            [num_case_negative, num_case_positive],
+        ]
+
+        chi2_result = chi2_contingency(contingency_table)
+        odds_ratio_result = odds_ratio(contingency_table)
+        odds_ratio_interval = odds_ratio_result.confidence_interval()
+
+        row = {
+            "category_name": category_name,
+            "odds_ratio": odds_ratio_result.statistic,
+            "odds_ratio_5": odds_ratio_interval.low,
+            "odds_ratio_95": odds_ratio_interval.high,
+            "pvalue": chi2_result.pvalue,
+            "num_case_positive": num_case_positive,
+            "num_case_negative": num_case_negative,
+            "num_control_positive": num_control_positive,
+            "num_control_negative": num_control_negative,
+        }
+
+        out_rollup_df.loc[i] = row
+
+    return out_rollup_df
+
+
+# In[89]:
+
+
+gof_case_df = get_rollup_df(case_sample_ids["GOF"])
+gof_case_df["Met285Thr"] = (
+    gof_case_df["person_id"].astype(str).isin(case_sample_ids["Met285Thr"])
+)
+gof_case_df.to_csv("GOF_case_rollup.csv")
+
+gof_control_df = get_rollup_df(control_sample_ids["GOF"])
+gof_control_df.to_csv("GOF_control_rollup.csv")
+
+gof_control_df
+gof_case_df
